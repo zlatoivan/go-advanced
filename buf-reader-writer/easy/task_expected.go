@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+)
 
 const MaxItems = 9999
 
@@ -25,6 +28,21 @@ func Pipe(p Producer, c Consumer) error {
 	for {
 		items, cookie, err := p.Next()
 		if err != nil {
+			if err == io.EOF {
+				if len(buf) > 0 {
+					err = c.Process(buf)
+					if err != nil {
+						return fmt.Errorf("push error: %w", err)
+					}
+					for _, ck := range cookies {
+						err = p.Commit(ck)
+						if err != nil {
+							return fmt.Errorf("error commiting cookie %d: %w", ck, err)
+						}
+					}
+				}
+				return io.EOF
+			}
 			return fmt.Errorf("read error: %w", err)
 		}
 
