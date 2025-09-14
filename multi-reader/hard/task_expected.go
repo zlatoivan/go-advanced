@@ -48,16 +48,13 @@ func NewMultiReader(buffersNum int, readers ...SizedReadSeekCloser) *MultiReader
 	}
 
 	prefixSizes := make([]int64, len(readers)+1)
-	var total int64
-	for i, r := range readers {
-		prefixSizes[i] = total
-		total += r.Size()
+	for i := 1; i < len(readers)+1; i++ {
+		prefixSizes[i] = prefixSizes[i-1] + readers[i-1].Size()
 	}
-	prefixSizes[len(readers)] = total
 
 	return &MultiReader{
 		readers:     readers,
-		totalSize:   total,
+		totalSize:   prefixSizes[len(readers)],
 		prefixSizes: prefixSizes,
 		buffersNum:  buffersNum,
 	}
@@ -271,11 +268,10 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 				curPos += int64(n) // Обновляем глобальную позицию на фактически прочитанные байты
 			}
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) { // Достигли конца этого ридера
-				nextReader()
-				continue
-			}
+		switch {
+		case err == io.EOF:
+			nextReader()
+		case err != nil:
 			sendErr(pfErrCh, err)
 			return
 		}
