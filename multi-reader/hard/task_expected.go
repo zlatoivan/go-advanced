@@ -18,7 +18,6 @@ type SizedReadSeekCloser interface {
 type MultiReader struct {
 	readers     []SizedReadSeekCloser // исходные ридеры
 	prefixSizes []int64               // абсолютные стартовые позиции ридеров (префиксные суммы)
-	absPos      int64                 // абсолютная позиция курсора чтения (пользователя)
 	windowBuf   []byte                // текущее окно данных
 	windowStart int64                 // абсолютная позиция начала окна
 	bufferSize  int64                 // размер одного блока префетча
@@ -53,7 +52,7 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 		m.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	if m.absPos == m.Size() {
+	if m.windowStart == m.Size() {
 		m.mu.Unlock()
 		return 0, io.EOF
 	}
@@ -63,7 +62,7 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		m.pfCancel = cancel
 		m.pfWg.Add(1)
-		go m.prefetchLoop(ctx, m.absPos)
+		go m.prefetchLoop(ctx, m.windowStart)
 	}
 	m.mu.Unlock()
 
@@ -75,7 +74,6 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 			copy(dst[:toCopy], m.windowBuf[:toCopy])
 			m.windowBuf = m.windowBuf[toCopy:]
 			m.windowStart += int64(toCopy)
-			m.absPos += int64(toCopy)
 			n += toCopy
 			if n == len(p) {
 				m.mu.Unlock()
@@ -111,7 +109,7 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 	switch whence {
 	case io.SeekStart:
 	case io.SeekCurrent:
-		seekPos += m.absPos
+		seekPos += m.windowStart
 	case io.SeekEnd:
 		seekPos += m.Size()
 	default:
@@ -140,7 +138,6 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	m.windowStart = seekPos
-	m.absPos = seekPos
 
 	return seekPos, nil
 }
