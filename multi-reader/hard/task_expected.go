@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -69,14 +68,23 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 	m.mu.Unlock()
 
 	for n < len(p) {
-		copied, ok := m.readFromWindow(p[n:]) // Пытаемся прочитать из окна без ожидания каналов
-		if ok {
-			n += copied
+		m.mu.Lock()
+		if len(m.windowBuf) != 0 { // Если данные в окне есть
+			dst := p[n:]
+			toCopy := min(len(dst), len(m.windowBuf)) // Копируем и продвигаем курсоры
+			copy(dst[:toCopy], m.windowBuf[:toCopy])
+			m.windowBuf = m.windowBuf[toCopy:]
+			m.windowStart += int64(toCopy)
+			m.absPos += int64(toCopy)
+			n += toCopy
 			if n == len(p) {
+				m.mu.Unlock()
 				break
 			}
+			m.mu.Unlock()
 			continue
 		}
+		m.mu.Unlock()
 
 		buf, okPf := <-m.pfBufCh // Окно пусто - ждём новый блок от префетчера
 		if !okPf {               // Канал данных закрыт - считываем итоговую ошибку/EOF
@@ -104,19 +112,17 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 		return 0, io.ErrClosedPipe
 	}
 
-	var base int64
+	seekPos := offset
 	switch whence {
 	case io.SeekStart:
-		base = 0
 	case io.SeekCurrent:
-		base = m.absPos
+		seekPos += m.absPos
 	case io.SeekEnd:
-		base = m.totalSize
+		seekPos += m.totalSize
 	default:
 		return 0, fmt.Errorf("invalid whence: %d", whence)
 	}
 
-	seekPos := base + offset
 	if seekPos < 0 || seekPos > m.totalSize {
 		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= totalSize (%d)", seekPos, m.totalSize)
 	}
@@ -153,16 +159,11 @@ func (m *MultiReader) Close() error {
 
 	m.pfWg.Wait()
 
-	var multiErr error
 	for _, r := range m.readers {
 		err := r.Close()
 		if err != nil {
-			multiErr = errors.Join(multiErr, err)
+			return fmt.Errorf("r.Close: %w", err)
 		}
-	}
-
-	if multiErr != nil {
-		return fmt.Errorf("error when closing: %w", multiErr)
 	}
 
 	return nil
@@ -255,24 +256,6 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 			return
 		}
 	}
-}
-
-// readFromWindow копирует данные из окна в dst под локом. Возвращает (copied, true), если данные были.
-func (m *MultiReader) readFromWindow(dst []byte) (int, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.windowBuf) == 0 { // Окно пусто - данных нет
-		return 0, false
-	}
-
-	toCopy := min(len(dst), len(m.windowBuf)) // Копируем и продвигаем курсоры
-	copy(dst[:toCopy], m.windowBuf[:toCopy])
-	m.windowBuf = m.windowBuf[toCopy:]
-	m.windowStart += int64(toCopy)
-	m.absPos += int64(toCopy)
-
-	return toCopy, true
 }
 
 // resetPrefetchLocked останавливает текущий префетч и сбрасывает его поля. Требует удержания m.mu
