@@ -117,7 +117,7 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	if seekPos < 0 || seekPos > m.Size() {
-		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= totalSize (%d)", seekPos, m.Size())
+		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= total size (%d)", seekPos, m.Size())
 	}
 
 	delta := seekPos - m.windowStart
@@ -126,15 +126,13 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 		m.windowBuf = m.windowBuf[delta:]
 	default: // Вне окна: сбрасываем окно и перезапускаем префетч при следующем чтении
 		m.windowBuf = nil
-		if m.pfBufCh != nil { // Останавливаем текущий префетч и сбрасываем его поля
-			if m.pfCancel != nil {
-				m.pfCancel()
-			}
-			m.pfWg.Wait() // Дождаться завершения старого префетчера, чтобы исключить параллельный доступ
-			m.pfBufCh = nil
-			m.pfErrCh = nil
-			m.pfCancel = nil
+		if m.pfCancel != nil {
+			m.pfCancel()
 		}
+		m.pfWg.Wait()   // Дождаться завершения старого префетчера, чтобы исключить параллельный доступ
+		m.pfBufCh = nil // Останавливаем текущий префетч и сбрасываем его поля
+		m.pfErrCh = nil
+		m.pfCancel = nil
 	}
 
 	m.windowStart = seekPos
