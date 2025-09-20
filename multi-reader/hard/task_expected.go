@@ -67,7 +67,7 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 	}
 	m.mu.Unlock()
 
-	for n < len(p) {
+	for {
 		m.mu.Lock()
 		if len(m.windowBuf) != 0 { // Если данные в окне есть
 			dst := p[n:]
@@ -79,10 +79,8 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 			n += toCopy
 			if n == len(p) {
 				m.mu.Unlock()
-				break
+				return n, nil
 			}
-			m.mu.Unlock()
-			continue
 		}
 		m.mu.Unlock()
 
@@ -99,8 +97,6 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 		m.windowBuf = append(m.windowBuf, buf...)
 		m.mu.Unlock()
 	}
-
-	return n, nil
 }
 
 // Seek перемещает курсор
@@ -133,8 +129,15 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 		m.windowBuf = m.windowBuf[delta:]
 	default: // Вне окна: сбрасываем окно и перезапускаем префетч при следующем чтении
 		m.windowBuf = nil
-		if m.pfStarted {
-			m.resetPrefetchLocked()
+		if m.pfStarted { // Останавливаем текущий префетч и сбрасываем его поля
+			if m.pfCancel != nil {
+				m.pfCancel()
+			}
+			m.pfWg.Wait() // Дождаться завершения старого префетчера, чтобы исключить параллельный доступ
+			m.pfStarted = false
+			m.pfBufCh = nil
+			m.pfErrCh = nil
+			m.pfCancel = nil
 		}
 	}
 
@@ -199,13 +202,7 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 	curPos := startPos
 	curReaderIdx := -1
 
-	for {
-		// Общий EOF: больше данных не будет, уведомляем и завершаемся
-		if curPos >= m.totalSize {
-			sendErr(m.pfErrCh, io.EOF)
-			return
-		}
-
+	for curPos < m.totalSize {
 		// Выбор активного ридера и установка needSeek
 		if curReaderIdx < 0 || !(m.prefixSizes[curReaderIdx] <= curPos && curPos < m.prefixSizes[curReaderIdx+1]) {
 			curReaderIdx = sort.Search(len(m.readers), func(i int) bool { return m.prefixSizes[i+1] > curPos })
@@ -216,7 +213,7 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 		localOffset := curPos - m.prefixSizes[curReaderIdx]
 		_, err := reader.Seek(localOffset, io.SeekStart)
 		if err != nil {
-			sendErr(m.pfErrCh, err)
+			m.sendErr(err)
 			return
 		}
 
@@ -236,7 +233,7 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 		if n > 0 {
 			select {
 			case <-ctx.Done():
-				sendErr(m.pfErrCh, ctx.Err())
+				m.sendErr(ctx.Err())
 				return
 			case m.pfBufCh <- buf[:n]: // Ждем, пока окно освободиться, чтобы записать следующий блок
 				curPos += int64(n) // Обновляем глобальную позицию на фактически прочитанные байты
@@ -246,28 +243,18 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 		case err == io.EOF:
 			nextReader()
 		case err != nil:
-			sendErr(m.pfErrCh, err)
+			m.sendErr(err)
 			return
 		}
 	}
-}
 
-// resetPrefetchLocked останавливает текущий префетч и сбрасывает его поля. Требует удержания m.mu
-func (m *MultiReader) resetPrefetchLocked() {
-	if m.pfCancel != nil {
-		m.pfCancel()
-	}
-	m.pfWg.Wait() // Дождаться завершения старого префетчера, чтобы исключить параллельный доступ
-	m.pfStarted = false
-	m.pfBufCh = nil
-	m.pfErrCh = nil
-	m.pfCancel = nil
+	m.sendErr(io.EOF)
 }
 
 // sendErr отправляет ошибку в канал, если есть место
-func sendErr(errCh chan<- error, err error) {
+func (m *MultiReader) sendErr(err error) {
 	select {
-	case errCh <- err:
+	case m.pfErrCh <- err:
 	default:
 	}
 }
