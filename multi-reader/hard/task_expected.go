@@ -33,8 +33,6 @@ type MultiReader struct {
 	closed      bool                  // флаг закрытия мультиридера
 }
 
-var _ SizedReadSeekCloser = (*MultiReader)(nil)
-
 // NewMultiReader создаёт конкатенированный ридер с поддержкой асинхронного префетча
 func NewMultiReader(buffersSize int64, buffersNum int, readers ...SizedReadSeekCloser) *MultiReader {
 	prefixSizes := make([]int64, len(readers)+1)
@@ -202,19 +200,15 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 	curPos := startPos
 
 	for curPos < m.totalSize {
-		// Выбор активного ридера
 		curReaderIdx := sort.Search(len(m.readers), func(i int) bool { return m.prefixSizes[i+1] > curPos })
 		reader := m.readers[curReaderIdx]
 
-		// Выполнение Seek
-		localOffset := curPos - m.prefixSizes[curReaderIdx]
-		_, err := reader.Seek(localOffset, io.SeekStart)
+		_, err := reader.Seek(curPos-m.prefixSizes[curReaderIdx], io.SeekStart)
 		if err != nil {
 			m.sendErr(err)
 			return
 		}
 
-		// Выполнение Read
 		remainInReader := m.prefixSizes[curReaderIdx+1] - curPos
 		if remainInReader == 0 { // Достигли границы ридеров
 			curPos = m.prefixSizes[curReaderIdx+1]
