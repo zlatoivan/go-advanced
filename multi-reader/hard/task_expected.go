@@ -198,7 +198,6 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 
 	curPos := startPos
 	curReaderIdx := -1
-	needSeek := true
 
 	for {
 		// Общий EOF: больше данных не будет, уведомляем и завершаемся
@@ -210,26 +209,21 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 		// Выбор активного ридера и установка needSeek
 		if curReaderIdx < 0 || !(m.prefixSizes[curReaderIdx] <= curPos && curPos < m.prefixSizes[curReaderIdx+1]) {
 			curReaderIdx = sort.Search(len(m.readers), func(i int) bool { return m.prefixSizes[i+1] > curPos })
-			needSeek = true
 		}
 		reader := m.readers[curReaderIdx]
 
 		// Выполнение Seek и сброс needSeek
-		if needSeek {
-			localOffset := curPos - m.prefixSizes[curReaderIdx]
-			_, err := reader.Seek(localOffset, io.SeekStart)
-			if err != nil {
-				sendErr(m.pfErrCh, err)
-				return
-			}
-			needSeek = false
+		localOffset := curPos - m.prefixSizes[curReaderIdx]
+		_, err := reader.Seek(localOffset, io.SeekStart)
+		if err != nil {
+			sendErr(m.pfErrCh, err)
+			return
 		}
 
 		// Выполнение Read
 		nextReader := func() {
 			curPos = m.prefixSizes[curReaderIdx+1]
 			curReaderIdx = -1
-			needSeek = true
 		}
 		remainInReader := m.prefixSizes[curReaderIdx+1] - curPos
 		if remainInReader == 0 { // Достигли границы ридеров
