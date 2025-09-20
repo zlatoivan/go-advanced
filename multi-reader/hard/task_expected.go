@@ -17,7 +17,6 @@ type SizedReadSeekCloser interface {
 // MultiReader объединяет несколько SizedReadSeekCloser в единый конкатенированный поток и поддерживает асинхронный префетч
 type MultiReader struct {
 	readers     []SizedReadSeekCloser // исходные ридеры
-	totalSize   int64                 // суммарный размер всех источников
 	prefixSizes []int64               // абсолютные стартовые позиции ридеров (префиксные суммы)
 	absPos      int64                 // абсолютная позиция курсора чтения (пользователя)
 	windowBuf   []byte                // текущее окно данных
@@ -41,7 +40,6 @@ func NewMultiReader(buffersSize int64, buffersNum int, readers ...SizedReadSeekC
 
 	return &MultiReader{
 		readers:     readers,
-		totalSize:   prefixSizes[len(readers)],
 		prefixSizes: prefixSizes,
 		buffersNum:  buffersNum,
 		bufferSize:  buffersSize,
@@ -55,7 +53,7 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 		m.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	if m.absPos == m.totalSize {
+	if m.absPos == m.Size() {
 		m.mu.Unlock()
 		return 0, io.EOF
 	}
@@ -115,13 +113,13 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		seekPos += m.absPos
 	case io.SeekEnd:
-		seekPos += m.totalSize
+		seekPos += m.Size()
 	default:
 		return 0, fmt.Errorf("invalid whence: %d", whence)
 	}
 
-	if seekPos < 0 || seekPos > m.totalSize {
-		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= totalSize (%d)", seekPos, m.totalSize)
+	if seekPos < 0 || seekPos > m.Size() {
+		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= totalSize (%d)", seekPos, m.Size())
 	}
 
 	delta := seekPos - m.windowStart
@@ -174,7 +172,7 @@ func (m *MultiReader) Close() error {
 
 // Size возвращает суммарный размер всех ридеров.
 func (m *MultiReader) Size() int64 {
-	return m.totalSize
+	return m.prefixSizes[len(m.readers)]
 }
 
 // prefetchLoop - горутина префетча. Наполняет pfBufCh блоками, по завершении шлёт ошибку в pfErrCh.
@@ -187,7 +185,7 @@ func (m *MultiReader) prefetchLoop(ctx context.Context, startPos int64) {
 
 	curPos := startPos
 
-	for curPos < m.totalSize {
+	for curPos < m.Size() {
 		curReaderIdx := sort.Search(len(m.readers), func(i int) bool { return m.prefixSizes[i+1] > curPos })
 		reader := m.readers[curReaderIdx]
 
