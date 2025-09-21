@@ -18,17 +18,20 @@ type SizedReadSeekCloser interface {
 type MultiReader struct {
 	readers     []SizedReadSeekCloser // исходные ридеры
 	prefixSizes []int64               // абсолютные стартовые позиции ридеров (префиксные суммы)
-	windowBuf   []byte                // текущее окно данных
-	windowStart int64                 // абсолютная позиция начала окна
 	bufferSize  int64                 // размер одного блока префетча
 	buffersNum  int                   // количество буферов
+	mu          sync.Mutex            // мьютекс для блокировок, блокирует все нижние поля:
+	windowBuf   []byte                // текущее окно данных
+	windowStart int64                 // абсолютная позиция начала окна
 	pfBufCh     chan []byte           // буферизированный канал блоков, наполняется префетчером
 	pfErrCh     chan error            // канал для ошибки/EOF от префетчера (ёмкость 1)
 	pfCancel    context.CancelFunc    // отмена контекста префетчера
 	pfWg        sync.WaitGroup        // ожидание завершения горутины префетчера
-	mu          sync.Mutex            // мьютекс для блокировок
 	closed      bool                  // флаг закрытия мультиридера
 }
+
+// Проверка, что MultiReader удовлетворяет интерфейсу SizedReadSeekCloser
+var _ SizedReadSeekCloser = (*MultiReader)(nil)
 
 // NewMultiReader создаёт конкатенированный ридер с поддержкой асинхронного префетча
 func NewMultiReader(buffersSize int64, buffersNum int, readers ...SizedReadSeekCloser) *MultiReader {

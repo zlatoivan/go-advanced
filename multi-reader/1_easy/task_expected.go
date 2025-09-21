@@ -16,12 +16,14 @@ type SizedReadSeekCloser interface {
 // MultiReader объединяет несколько SizedReadSeekCloser в единый конкатенированный поток.
 type MultiReader struct {
 	readers     []SizedReadSeekCloser // Содержит исходные ридеры в порядке конкатенации
-	totalSize   int64                 // Суммарный размер всех ридеров, вычисляется один раз в NewMultiReader
 	prefixSizes []int64               // prefixSizes[i] - абсолютная стартовая позиция i-го ридера (длина = len(readers)+1)
 	absPos      int64                 // Абсолютная позиция в объединённом потоке
 	needSeek    bool                  // Флаг - нужно ли выставить позицию перед следующим чтением
 	closed      bool                  // Флаг - MultiReader закрыт и дальнейшие операции недоступны
 }
+
+// Проверка, что MultiReader удовлетворяет интерфейсу SizedReadSeekCloser
+var _ SizedReadSeekCloser = (*MultiReader)(nil)
 
 // NewMultiReader создаёт конкатенированный ридер поверх набора SizedReadSeekCloser.
 func NewMultiReader(readers ...SizedReadSeekCloser) *MultiReader {
@@ -35,16 +37,12 @@ func NewMultiReader(readers ...SizedReadSeekCloser) *MultiReader {
 
 	return &MultiReader{
 		readers:     readers,
-		totalSize:   total,
 		prefixSizes: prefixSizes,
 		absPos:      0,
 		needSeek:    true,
 		closed:      false,
 	}
 }
-
-// Проверка, что MultiReader удовлетворяет интерфейсу SizedReadSeekCloser
-var _ SizedReadSeekCloser = (*MultiReader)(nil)
 
 // Read читает данные последовательно из всех ридеров в порядке передачи в NewMultiReader.
 func (m *MultiReader) Read(p []byte) (n int, err error) {
@@ -54,12 +52,12 @@ func (m *MultiReader) Read(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if m.absPos == m.totalSize {
+	if m.absPos == m.Size() {
 		return 0, io.EOF
 	}
 
 	for n < len(p) {
-		if m.absPos == m.totalSize { // Уже что-то прочитали в этом вызове (n > 0), а затем дошли до конца
+		if m.absPos == m.Size() { // Уже что-то прочитали в этом вызове (n > 0), а затем дошли до конца
 			return n, nil
 		}
 
@@ -117,18 +115,18 @@ func (m *MultiReader) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		base = m.absPos
 	case io.SeekEnd:
-		base = m.totalSize
+		base = m.Size()
 	default:
 		return 0, fmt.Errorf("invalid whence: %d", whence)
 	}
 
 	seekPos := base + offset
-	if seekPos < 0 || seekPos > m.totalSize { // Позиция, равная totalSize, допустима (это валидный EOF).
-		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= totalSize (%d)", seekPos, m.totalSize)
+	if seekPos < 0 || seekPos > m.Size() { // Позиция, равная totalSize, допустима (это валидный EOF).
+		return 0, fmt.Errorf("seek position (%d) should be >= 0 and <= total size (%d)", seekPos, m.Size())
 	}
 
 	m.absPos = seekPos
-	m.needSeek = seekPos != m.totalSize // Ленивый seek: фактический Seek в нижнем ридере произойдёт при первом Read
+	m.needSeek = seekPos != m.Size() // Ленивый seek: фактический Seek в нижнем ридере произойдёт при первом Read
 
 	return seekPos, nil
 }
@@ -138,6 +136,7 @@ func (m *MultiReader) Close() error {
 	if m.closed {
 		return nil
 	}
+	m.closed = true
 
 	var multiErr error
 	for _, r := range m.readers {
@@ -146,8 +145,6 @@ func (m *MultiReader) Close() error {
 			multiErr = errors.Join(err, multiErr)
 		}
 	}
-
-	m.closed = true
 
 	if multiErr != nil {
 		return fmt.Errorf("error when closing: %w", multiErr)
@@ -158,5 +155,5 @@ func (m *MultiReader) Close() error {
 
 // Size возвращает суммарный размер всех ридеров.
 func (m *MultiReader) Size() int64 {
-	return m.totalSize
+	return m.Size()
 }

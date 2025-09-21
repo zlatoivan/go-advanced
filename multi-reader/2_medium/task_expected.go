@@ -16,15 +16,15 @@ type SizedReadCloser interface {
 // MultiReader объединяет несколько SizedReadCloser в единый конкатенированный поток и поддерживает асинхронный префетч
 type MultiReader struct {
 	readers    []SizedReadCloser  // исходные ридеры
-	totalSize  int64              // Сумма длин всех внутренних ридеров
-	windowBuf  []byte             // текущее окно данных
+	totalSize  int64              // Суммарный размер всех внутренних ридеров
 	bufferSize int64              // размер одного блока префетча
 	buffersNum int                // количество буферов
+	mu         sync.Mutex         // мьютекс для блокировок, блокирует все нижние поля:
+	windowBuf  []byte             // текущее окно данных
 	pfBufCh    chan []byte        // буферизированный канал блоков, наполняется префетчером
 	pfErrCh    chan error         // канал для ошибки/EOF от префетчера (ёмкость 1)
 	pfCancel   context.CancelFunc // отмена контекста префетчера
 	pfWg       sync.WaitGroup     // ожидание завершения горутины префетчера
-	mu         sync.Mutex         // мьютекс для блокировок
 	closed     bool               // флаг закрытия мультиридера
 }
 
